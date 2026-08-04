@@ -3,6 +3,7 @@ package console
 import (
 	"io"
 	"netfs/api"
+	"netfs/ui/console/message"
 	"path/filepath"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -34,6 +35,14 @@ type OpenDeleteFileModalMsg struct {
 }
 
 type CloseDeleteFileModalMsg struct {
+	Action string
+}
+
+type OpenCreateFileModelMsg struct {
+	Type api.FileType
+}
+
+type CloseCreateFileModelMsg struct {
 	Action string
 }
 
@@ -98,14 +107,15 @@ func (FileViewItemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 }
 
 type FileView struct {
-	modal    tea.Model
-	list     list.Model
-	delegate *FileViewItemDelegate
-	style    lipgloss.Style
-	prev     *FileViewHistoryNode
-	host     *api.RemoteHost
-	network  *api.Network
-	toCopy   *api.RemoteFile
+	inputModal tea.Model
+	modal      tea.Model
+	list       list.Model
+	delegate   *FileViewItemDelegate
+	style      lipgloss.Style
+	prev       *FileViewHistoryNode
+	host       *api.RemoteHost
+	network    *api.Network
+	toCopy     *api.RemoteFile
 }
 
 func (model FileView) Init() tea.Cmd {
@@ -120,9 +130,10 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var modalCmd tea.Cmd
 
 	modal := model.modal.(*Modal)
+	inputModal := model.inputModal.(*TextInputModal)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if !modal.GetVisibled() {
+		if !modal.GetVisibled() && !inputModal.GetVisibled() {
 			switch msg.Type {
 			// Enter to the selected directory.
 			case tea.KeyEnter:
@@ -165,6 +176,13 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return OpenDeleteFileModalMsg{File: item.(*FileViewItem).File}
 					}
 				}
+
+			case tea.KeyRunes:
+				if msg.String() == "alt+d" { // TODO. From settings
+					cmd = func() tea.Msg { return OpenCreateFileModelMsg{Type: api.DIRECTORY} }
+				} else if msg.String() == "alt+n" { // TODO. From settings
+					cmd = func() tea.Msg { return OpenCreateFileModelMsg{Type: api.DIRECTORY} }
+				}
 			}
 		}
 	case ChangeActiveHostMsg:
@@ -197,6 +215,18 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Action == "Yes" {
 			cmd = model.deleteFile()
 		}
+	case OpenCreateFileModelMsg:
+		inputModal.SetVisibled(true)
+		inputModal.SetTitle("Create file?")
+		inputModal.SetButtons([]ModalButton{
+			{"Yes(Y)", "Y", func() tea.Msg { return CloseCreateFileModelMsg{Action: "Yes"} }},
+			{"Cancel(C)", "C", func() tea.Msg { return CloseCreateFileModelMsg{Action: "Cancel"} }},
+		})
+	case CloseCreateFileModelMsg:
+		inputModal.SetVisibled(false)
+		if msg.Action == "Yes" {
+
+		}
 	case ChangeActiveViewMsg:
 		if msg.View == File {
 			model.delegate.isActive = true
@@ -205,7 +235,7 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model.delegate.isActive = false
 			model.style = model.style.BorderForeground(lipgloss.Color("#ffffff"))
 		}
-	case ResizeMsg:
+	case message.ResizeMsg:
 		frameX, frameY := model.style.GetFrameSize()
 		width := msg.Width - frameX
 		height := msg.Height - frameY
@@ -224,11 +254,14 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.list.SetSize(width, height)
 	}
 
-	if !modal.GetVisibled() {
-		model.list, listCmd = model.list.Update(msg)
-	} else {
+	if modal.GetVisibled() {
 		model.modal, modalCmd = model.modal.Update(msg)
+	} else if inputModal.GetVisibled() {
+		model.inputModal, modalCmd = model.inputModal.Update(msg)
+	} else {
+		model.list, listCmd = model.list.Update(msg)
 	}
+
 	return model, tea.Sequence(cmd, headerCmd, footerCmd, listCmd, modalCmd)
 }
 
@@ -240,6 +273,15 @@ func (model FileView) View() string {
 			AlignVertical(lipgloss.Center).
 			AlignHorizontal(lipgloss.Center).
 			Render(model.modal.View())
+	}
+
+	inputModal := model.inputModal.(*TextInputModal)
+	if inputModal.GetVisibled() {
+		return model.
+			style.
+			AlignVertical(lipgloss.Center).
+			AlignHorizontal(lipgloss.Center).
+			Render(model.inputModal.View())
 	}
 
 	return model.style.Render(model.list.View())
@@ -271,6 +313,7 @@ func NewFileView(network *api.Network) tea.Model {
 		BorderStyle(lipgloss.NormalBorder())
 
 	view.modal = NewModal()
+	view.inputModal = NewTextInputModal()
 
 	return view
 }

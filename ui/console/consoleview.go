@@ -2,6 +2,8 @@ package console
 
 import (
 	"netfs/api"
+	"netfs/ui/console/message"
+	"netfs/ui/console/modal"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,15 +27,6 @@ const (
 	Task
 )
 
-// The event sends after changing the terminal size.
-type ResizeMsg struct {
-	Width  int
-	Height int
-}
-
-// The event sends every N seconds.
-type RefreshMsg struct{}
-
 // The event sends after switching to another view.
 type ChangeActiveViewMsg struct {
 	View ConsoleActiveView
@@ -46,6 +39,7 @@ type ConsoleView struct {
 	taskView   tea.Model
 	activeView ConsoleActiveView
 	style      lipgloss.Style
+	modalView  tea.Model
 }
 
 func (model ConsoleView) Init() tea.Cmd {
@@ -53,8 +47,9 @@ func (model ConsoleView) Init() tea.Cmd {
 		model.hostsView.Init(),
 		model.fileView.Init(),
 		model.taskView.Init(),
+		model.modalView.Init(),
 		func() tea.Msg { return ChangeActiveViewMsg{View: Host} },
-		tea.Every(3*time.Second, func(t time.Time) tea.Msg { return RefreshMsg{} }), // TODO. 3*time.Second - from settings
+		tea.Every(3*time.Second, func(t time.Time) tea.Msg { return message.RefreshMsg{} }), // TODO. 3*time.Second - from settings
 	)
 }
 
@@ -63,33 +58,45 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var hostViewCmd tea.Cmd
 	var fileViewCmd tea.Cmd
 	var taskViewCmd tea.Cmd
+	var modalViewCmd tea.Cmd
 
+	modal := model.modalView.(*modal.ModalGroupView)
 	switch msg := msg.(type) {
-	case RefreshMsg:
-		cmd = tea.Every(3*time.Second, func(t time.Time) tea.Msg { return RefreshMsg{} }) // TODO. 3*time.Second - from settings
+	case message.RefreshMsg:
+		cmd = tea.Every(3*time.Second, func(t time.Time) tea.Msg { return message.RefreshMsg{} }) // TODO. 3*time.Second - from settings
 		model.hostsView, hostViewCmd = model.hostsView.Update(msg)
 		model.fileView, fileViewCmd = model.fileView.Update(msg)
 		model.taskView, taskViewCmd = model.taskView.Update(msg)
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case QuitKeyMsg:
+		// Quit
+		if msg.String() == QuitKeyMsg {
 			return model, tea.Quit
-		case HostActiveKeyMsg:
-			return model, func() tea.Msg { return ChangeActiveViewMsg{View: Host} }
-		case FileActiveKeyMsg:
-			return model, func() tea.Msg { return ChangeActiveViewMsg{View: File} }
-		case TaskActiveKeyMsg:
-			return model, func() tea.Msg { return ChangeActiveViewMsg{View: Task} }
 		}
 
-		switch model.activeView {
-		case Host:
-			model.hostsView, hostViewCmd = model.hostsView.Update(msg)
-		case File:
-			model.fileView, fileViewCmd = model.fileView.Update(msg)
-		case Task:
-			model.taskView, taskViewCmd = model.taskView.Update(msg)
+		// Blocks input when modal is visible
+		if modal.GetVisibled() {
+			model.modalView, modalViewCmd = model.taskView.Update(msg)
+		} else {
+			// Switches to active view
+			switch msg.String() {
+			case HostActiveKeyMsg:
+				cmd = func() tea.Msg { return ChangeActiveViewMsg{View: Host} }
+			case FileActiveKeyMsg:
+				cmd = func() tea.Msg { return ChangeActiveViewMsg{View: File} }
+			case TaskActiveKeyMsg:
+				cmd = func() tea.Msg { return ChangeActiveViewMsg{View: Task} }
+			default:
+				// Propagates input to active view
+				switch model.activeView {
+				case Host:
+					model.hostsView, hostViewCmd = model.hostsView.Update(msg)
+				case File:
+					model.fileView, fileViewCmd = model.fileView.Update(msg)
+				case Task:
+					model.taskView, taskViewCmd = model.taskView.Update(msg)
+				}
+			}
 		}
 
 	case ChangeActiveViewMsg:
@@ -119,18 +126,22 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		fileViewWidth := int(width - hostViewWidth)
 		fileViewHeight := int((height / 100.0) * 70.0)
 
-		model.hostsView, hostViewCmd = model.hostsView.Update(ResizeMsg{Width: int(hostViewWidth), Height: int(height)})
-		model.fileView, fileViewCmd = model.fileView.Update(ResizeMsg{Width: fileViewWidth, Height: fileViewHeight})
-		model.taskView, taskViewCmd = model.taskView.Update(ResizeMsg{Width: fileViewWidth, Height: int(height) - fileViewHeight})
+		model.hostsView, hostViewCmd = model.hostsView.Update(message.ResizeMsg{Width: int(hostViewWidth), Height: int(height)})
+		model.fileView, fileViewCmd = model.fileView.Update(message.ResizeMsg{Width: fileViewWidth, Height: fileViewHeight})
+		model.taskView, taskViewCmd = model.taskView.Update(message.ResizeMsg{Width: fileViewWidth, Height: int(height) - fileViewHeight})
+		model.modalView, modalViewCmd = model.modalView.Update(message.ResizeMsg{Width: int(width), Height: int(height)})
 	default:
-		model.hostsView, hostViewCmd = model.hostsView.Update(msg)
-		model.fileView, fileViewCmd = model.fileView.Update(msg)
-		model.taskView, taskViewCmd = model.taskView.Update(msg)
-
-		return model, tea.Sequence(cmd, hostViewCmd, fileViewCmd, taskViewCmd)
+		// Blocks input when modal is visible
+		if modal.GetVisibled() {
+			model.modalView, modalViewCmd = model.taskView.Update(msg)
+		} else {
+			model.hostsView, hostViewCmd = model.hostsView.Update(msg)
+			model.fileView, fileViewCmd = model.fileView.Update(msg)
+			model.taskView, taskViewCmd = model.taskView.Update(msg)
+		}
 	}
 
-	return model, tea.Sequence(cmd, hostViewCmd, fileViewCmd, taskViewCmd)
+	return model, tea.Sequence(cmd, hostViewCmd, fileViewCmd, taskViewCmd, modalViewCmd)
 }
 
 func (model ConsoleView) View() string {
@@ -157,6 +168,7 @@ func NewConsoleViewModel(network *api.Network) tea.Model {
 		hostsView: NewHostView(network),
 		fileView:  NewFileView(network),
 		taskView:  NewTaskView(network),
+		modalView: modal.NewModalGroupView(),
 		style:     style,
 	}
 }

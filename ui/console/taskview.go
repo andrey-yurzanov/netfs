@@ -3,6 +3,7 @@ package console
 import (
 	"io"
 	"netfs/api"
+	"netfs/ui/console/message"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -116,11 +117,11 @@ func (model TaskView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model.delegate.isActive = false
 			model.style = model.style.BorderForeground(lipgloss.Color("#ffffff"))
 		}
-	case RefreshMsg:
+	case message.RefreshMsg:
 		if model.host != nil {
 			cmd = model.resolveTasks()
 		}
-	case ResizeMsg:
+	case message.ResizeMsg:
 		frameX, frameY := model.style.GetFrameSize()
 		width := msg.Width - frameX
 		height := msg.Height - frameY

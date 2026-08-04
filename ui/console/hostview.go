@@ -3,6 +3,7 @@ package console
 import (
 	"io"
 	"netfs/api"
+	"netfs/ui/console/message"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -99,7 +100,7 @@ func (model HostView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.active = (msg.View == Host)
 	case ChangeHostsMsg:
 		cmd = model.list.SetItems(msg.Items)
-	case ResizeMsg:
+	case message.ResizeMsg:
 		frameX, frameY := model.style.GetFrameSize()
 		width := msg.Width - frameX
 		height := msg.Height - frameY

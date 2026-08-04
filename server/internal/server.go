@@ -588,7 +588,7 @@ func (sch *CopyScheduler) copyFile(task *api.RemoteCopyTask, cancel chan api.Tas
 						}
 					default:
 						if size > 0 {
-							if read, err = file.ReadAt(buffer, offset); err == nil {
+							if read, err = file.ReadAt(buffer, offset); read > 0 {
 								if err = target.Write(client, buffer[:read]); err == nil {
 									offset += int64(read)
 									task.Progress = int(min((float64(offset) / progressPercent), 100.0))
