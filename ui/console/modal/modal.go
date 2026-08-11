@@ -7,6 +7,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ModalButtonType defines the set of available buttons for the modal windows.
+type ModalButtonType uint8
+
+const (
+	// NONE represents an uninitialized button state.
+	NONE ModalButtonType = iota
+
+	// YES represents the confirmation action.
+	YES
+
+	// NO represents the cancellation action.
+	NO
+)
+
 // OpenModalMsg represents a message used to trigger the opening of a modal window.
 type OpenModalMsg struct {
 	// Name is the unique name of the modal to be opened.
