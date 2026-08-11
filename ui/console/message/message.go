@@ -1,10 +1,10 @@
 package message
 
-// The event sends after changing the terminal size.
+// An event sent after changing of the terminal size.
 type ResizeMsg struct {
 	Width  int
 	Height int
 }
 
-// The event sends every N seconds.
+// An event is sent every N seconds.
 type RefreshMsg struct{}

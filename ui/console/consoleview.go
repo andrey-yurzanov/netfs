@@ -60,7 +60,7 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var taskViewCmd tea.Cmd
 	var modalViewCmd tea.Cmd
 
-	modal := model.modalView.(*modal.ModalGroupView)
+	modalView := model.modalView.(*modal.ModalGroupView)
 	switch msg := msg.(type) {
 	case message.RefreshMsg:
 		cmd = tea.Every(3*time.Second, func(t time.Time) tea.Msg { return message.RefreshMsg{} }) // TODO. 3*time.Second - from settings
@@ -75,8 +75,8 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Blocks input when modal is visible
-		if modal.GetVisibled() {
-			model.modalView, modalViewCmd = model.taskView.Update(msg)
+		if modalView.Visible() {
+			model.modalView, modalViewCmd = model.modalView.Update(msg)
 		} else {
 			// Switches to active view
 			switch msg.String() {
@@ -130,10 +130,20 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.fileView, fileViewCmd = model.fileView.Update(message.ResizeMsg{Width: fileViewWidth, Height: fileViewHeight})
 		model.taskView, taskViewCmd = model.taskView.Update(message.ResizeMsg{Width: fileViewWidth, Height: int(height) - fileViewHeight})
 		model.modalView, modalViewCmd = model.modalView.Update(message.ResizeMsg{Width: int(width), Height: int(height)})
+	case modal.OpenModalMsg:
+		model.modalView, modalViewCmd = model.modalView.Update(msg)
+		model.hostsView, hostViewCmd = model.hostsView.Update(msg)
+		model.fileView, fileViewCmd = model.fileView.Update(msg)
+		model.taskView, taskViewCmd = model.taskView.Update(msg)
+	case modal.CloseModalMsg:
+		model.modalView, modalViewCmd = model.modalView.Update(msg)
+		model.hostsView, hostViewCmd = model.hostsView.Update(msg)
+		model.fileView, fileViewCmd = model.fileView.Update(msg)
+		model.taskView, taskViewCmd = model.taskView.Update(msg)
 	default:
 		// Blocks input when modal is visible
-		if modal.GetVisibled() {
-			model.modalView, modalViewCmd = model.taskView.Update(msg)
+		if modalView.Visible() {
+			model.modalView, modalViewCmd = model.modalView.Update(msg)
 		} else {
 			model.hostsView, hostViewCmd = model.hostsView.Update(msg)
 			model.fileView, fileViewCmd = model.fileView.Update(msg)
@@ -145,6 +155,11 @@ func (model ConsoleView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (model ConsoleView) View() string {
+	modal := model.modalView.(*modal.ModalGroupView)
+	if modal.Visible() {
+		return modal.View()
+	}
+
 	return model.style.Render(
 		lipgloss.JoinHorizontal(
 			lipgloss.Top,
@@ -165,10 +180,12 @@ func NewConsoleViewModel(network *api.Network) tea.Model {
 		Align(lipgloss.Left, lipgloss.Left)
 
 	return ConsoleView{
+		style:     style,
 		hostsView: NewHostView(network),
 		fileView:  NewFileView(network),
 		taskView:  NewTaskView(network),
-		modalView: modal.NewModalGroupView(),
-		style:     style,
+		modalView: modal.NewModalGroupView(
+			modal.ModalGroupViewItem{Name: modal.ConfirmModal, Modal: modal.NewConfirmModalView()},
+		),
 	}
 }
