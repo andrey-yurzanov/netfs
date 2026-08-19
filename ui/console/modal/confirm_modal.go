@@ -5,7 +5,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ConfirmModal is the name for the confirmation modal window.
+// ConfirmModal is the name for the ConfirmModalView.
 const ConfirmModal = "ConfirmModal"
 
 // ConfirmModalView is a modal window for confirming an action.
@@ -65,7 +65,7 @@ func (model ConfirmModalView) View() string {
 	var yesButton, noButton string
 	switch model.button {
 	case YES:
-		yesButton = model.buttonSelectedStyle.Render("Yes (alt+y)")
+		yesButton = model.buttonSelectedStyle.Render("Yes (alt+y)") // TODO. from settings.
 		noButton = model.buttonStyle.Render("No (alt+n)")
 	case NO:
 		yesButton = model.buttonStyle.Render("Yes (alt+y)")
@@ -91,13 +91,13 @@ func (model ConfirmModalView) View() string {
 }
 
 func (model ConfirmModalView) isOkButton(msg tea.KeyMsg) bool {
-	return (msg.Type == tea.KeyEnter && model.button == YES) || (msg.String() == "alt+y")
+	return (msg.Type == tea.KeyEnter && model.button == YES) || (msg.String() == "alt+y") // TODO. from settings.
 }
 
 func (model ConfirmModalView) isCancelButton(msg tea.KeyMsg) bool {
 	return (msg.Type == tea.KeyEnter && model.button == NO) ||
 		(msg.Type == tea.KeyEsc) ||
-		(msg.String() == "alt+n")
+		(msg.String() == "alt+n") // TODO. from settings.
 }
 
 // NewConfirmModalView creates a new instance of ConfirmModalView.
@@ -112,7 +112,7 @@ func NewConfirmModalView() *ConfirmModalView {
 			MarginRight(1).
 			Align(lipgloss.Center).
 			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#fff")),
+			BorderForeground(lipgloss.Color("#fff")), // TODO. from settings.
 		buttonSelectedStyle: lipgloss.
 			NewStyle().
 			MarginRight(1).

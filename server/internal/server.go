@@ -217,6 +217,7 @@ func (srv *Server) FileInfoHandle(req transport.Request) ([]byte, any, error) {
 	}
 }
 
+// BUG. Returns empty list, after copy a single file.
 // The function handles request and returns children of the directory.
 func (srv *Server) FileChildrenHandle(req transport.Request) ([]byte, any, error) {
 	var children []api.FileInfo

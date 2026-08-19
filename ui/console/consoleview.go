@@ -186,7 +186,7 @@ func NewConsoleViewModel(network *api.Network) tea.Model {
 		taskView:  NewTaskView(network),
 		modalView: modal.NewModalGroupView(
 			modal.ModalGroupViewItem{Name: modal.ConfirmModal, Modal: modal.NewConfirmModalView()},
-			modal.ModalGroupViewItem{Name: "CreateModal", Modal: modal.NewTextInputModalView()},
+			modal.ModalGroupViewItem{Name: modal.TextInputModal, Modal: modal.NewTextInputModalView(modal.TextInputModal)},
 		),
 	}
 }

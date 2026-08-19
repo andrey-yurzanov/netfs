@@ -17,6 +17,11 @@ const COLUMN_TYPE_WIDTH = 5
 const COLUMN_SIZE_WIDTH = 15
 const TOO_LONG_LINE_POSTFIX = "..."
 
+const deleteFileAction = "DeleteFile"
+const copyFileAction = "CopyFile"
+const createFileAction = "CreateFile"
+const createDirectoryAction = "CreateDirectory"
+
 var TOO_LONG_LINE_POSTFIX_WIDTH = lipgloss.Width(TOO_LONG_LINE_POSTFIX)
 
 type UpdateFilesMsg struct {
@@ -84,6 +89,7 @@ func (FileViewItemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 }
 
 type FileView struct {
+	count    int
 	list     list.Model
 	style    lipgloss.Style
 	id       string
@@ -99,11 +105,52 @@ func (model FileView) Init() tea.Cmd {
 }
 
 func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	var headerCmd tea.Cmd
-	var footerCmd tea.Cmd
-	var listCmd tea.Cmd
-	var modalCmd tea.Cmd
+	var cmd, headerCmd, footerCmd, listCmd, modalCmd tea.Cmd
+
+	// Copy files and directory.
+	if model.isCopyKeyPressed(msg) {
+		model.toCopy = model.selectedItem()
+	} else if model.isPasteKeyPressed(msg) {
+		if model.toCopy != nil && model.prev.Item != nil {
+			cmd = model.copyFile(false)
+		}
+	} else if model.isCopyFileConfirm(msg) {
+		cmd = model.copyFile(true)
+	}
+
+	// Create files and directories.
+	if model.isCreateFileKeyPressed(msg) {
+		cmd = func() tea.Msg {
+			return modal.OpenModalMsg{
+				Name:    modal.TextInputModal,
+				Action:  createFileAction,
+				Invoker: model.id,
+				Payload: modal.TextInputModalPayload{Title: "Create a new file?", Validator: model.checkFileExistsInList},
+			}
+		}
+	} else if model.isCreateDirectoryKeyPressed(msg) {
+		cmd = func() tea.Msg {
+			return modal.OpenModalMsg{
+				Name:    modal.TextInputModal,
+				Action:  createDirectoryAction,
+				Invoker: model.id,
+				Payload: modal.TextInputModalPayload{Title: "Create a new directory?", Validator: model.checkFileExistsInList},
+			}
+		}
+	} else if model.isCreateFileConfirm(msg) {
+		cmd = model.createFile(msg, api.FILE)
+	} else if model.isCreateDirectoryConfirm(msg) {
+		cmd = model.createFile(msg, api.DIRECTORY)
+	}
+
+	if model.isDeleteKeyPressed(msg) {
+		item := model.selectedItem()
+		cmd = func() tea.Msg {
+			return modal.OpenModalMsg{Name: modal.ConfirmModal, Action: deleteFileAction, Invoker: model.id, Payload: item.Info.Name}
+		}
+	} else if model.isDeleteFileConfirm(msg) {
+		cmd = model.deleteFile()
+	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -131,31 +178,6 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmd = model.resolveFileChildren(item.(*FileViewItem).File)
 				}
 			}
-		// Marks the file for copying.
-		case tea.KeyCtrlC:
-			item := model.list.SelectedItem()
-			if _, ok := item.(*FileViewItem); ok {
-				model.toCopy = item.(*FileViewItem).File
-			}
-		// Starts the file copying.
-		case tea.KeyCtrlV:
-			if model.toCopy != nil && model.prev.Item != nil {
-				cmd = model.copyFile(false)
-			}
-		case tea.KeyDelete:
-			item := model.list.SelectedItem()
-			if _, ok := item.(*FileViewItem); ok {
-				cmd = func() tea.Msg {
-					return modal.OpenModalMsg{Name: modal.ConfirmModal, Invoker: model.id, Payload: item.(*FileViewItem).File.Info.Name}
-				}
-			}
-		}
-	case modal.CloseModalMsg:
-		if msg.Invoker == model.id {
-			if msg.Name == modal.ConfirmModal && msg.Button == modal.YES {
-				cmd = model.deleteFile()
-			}
-			// TODO. add for copy
 		}
 	case ChangeActiveHostMsg:
 		model.prev = &FileViewHistoryNode{}
@@ -166,10 +188,10 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ChangeActiveViewMsg:
 		if msg.View == File {
 			model.delegate.isActive = true
-			model.style = model.style.BorderForeground(lipgloss.Color("#3b82f6"))
+			model.style = model.style.BorderForeground(lipgloss.Color("#3b82f6")) // TODO. from settings
 		} else {
 			model.delegate.isActive = false
-			model.style = model.style.BorderForeground(lipgloss.Color("#ffffff"))
+			model.style = model.style.BorderForeground(lipgloss.Color("#ffffff")) // TODO. from settings
 		}
 	case message.ResizeMsg:
 		frameX, frameY := model.style.GetFrameSize()
@@ -196,6 +218,89 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model FileView) View() string {
 	return model.style.Render(model.list.View())
+}
+
+func (model FileView) selectedItem() *api.RemoteFile {
+	item := model.list.SelectedItem()
+	return item.(*FileViewItem).File
+}
+
+func (model FileView) isCopyKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+c" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isPasteKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+v" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isCreateFileKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+n" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isCreateDirectoryKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+d" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isCreateFileConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.TextInputModal &&
+			msg.Action == createFileAction &&
+			msg.Button == modal.YES
+
+	}
+	return false
+}
+
+func (model FileView) isCreateDirectoryConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.TextInputModal &&
+			msg.Action == createDirectoryAction &&
+			msg.Button == modal.YES
+
+	}
+	return false
+}
+
+func (model FileView) isDeleteKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "delete" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isDeleteFileConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.ConfirmModal &&
+			msg.Action == deleteFileAction &&
+			msg.Button == modal.YES
+	}
+	return false
+}
+
+func (model FileView) isCopyFileConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.ConfirmModal &&
+			msg.Action == copyFileAction &&
+			msg.Button == modal.YES
+
+	}
+	return false
 }
 
 func (model FileView) resolveFileChildren(file *api.RemoteFile) tea.Cmd {
@@ -231,7 +336,12 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 		if !replace {
 			_, err = model.host.File(client, api.FileId(target.Info.Path))
 			if err == nil { // File already exists.
-				return modal.OpenModalMsg{Name: modal.ConfirmModal, Invoker: model.id, Payload: target.Info.Name}
+				return modal.OpenModalMsg{
+					Name:    modal.ConfirmModal,
+					Action:  copyFileAction,
+					Invoker: model.id,
+					Payload: target.Info.Name,
+				}
 			} else { // File not exists.
 				_, err = file.CopyTo(model.network.Transport(), target)
 			}
@@ -239,7 +349,6 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 			_, err = file.CopyTo(model.network.Transport(), target)
 		}
 
-		// TODO. it does not working!
 		children, _ := item.File.Children(model.network.Transport())
 		items := make([]list.Item, len(children))
 		for index, file := range children {
@@ -251,24 +360,80 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 
 func (model FileView) deleteFile() tea.Cmd {
 	return func() tea.Msg {
-		item := model.list.SelectedItem()
-		if _, ok := item.(*FileViewItem); ok {
-			file := item.(*FileViewItem).File
-			file.Remove(model.network.Transport())
+		file := model.selectedItem()
+		file.Remove(model.network.Transport())
 
-			item = model.prev.Item
-			if _, ok := item.(*FileViewItem); ok {
-				file = item.(*FileViewItem).File
-				children, _ := file.Children(model.network.Transport())
-				items := make([]list.Item, len(children))
-				for index, file := range children {
-					items[index] = &FileViewItem{File: &file}
-				}
-				return UpdateFilesMsg{Items: items}
-			}
+		file = model.prev.Item.(*FileViewItem).File
+		children, _ := file.Children(model.network.Transport())
+		items := make([]list.Item, len(children))
+		for index, file := range children {
+			items[index] = &FileViewItem{File: &file}
 		}
-		return nil
+		return UpdateFilesMsg{Items: items}
 	}
+}
+
+func (model FileView) createFile(msg tea.Msg, fileType api.FileType) tea.Cmd {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		payload := msg.Payload.(modal.TextInputModalPayload)
+		return func() tea.Msg {
+			client := model.network.Transport()
+			item := model.prev.Item.(*FileViewItem)
+			path := filepath.Join(item.File.Info.Path, payload.Value)
+			target := api.RemoteFile{
+				Host: *model.host,
+				Info: api.FileInfo{
+					Id:   api.FileId(path),
+					Name: payload.Value,
+					Path: path,
+					Type: fileType,
+				},
+			}
+
+			_, err := model.host.File(client, api.FileId(target.Info.Path))
+			if err == nil {
+				if fileType == api.FILE {
+					return modal.OpenModalMsg{
+						Name:    modal.TextInputModal,
+						Action:  createFileAction,
+						Invoker: model.id,
+						Payload: modal.TextInputModalPayload{Title: "Create a new file?", Error: payload.Value + " already exists!", Validator: model.checkFileExistsInList},
+					}
+				} else {
+					return modal.OpenModalMsg{
+						Name:    modal.TextInputModal,
+						Action:  createDirectoryAction,
+						Invoker: model.id,
+						Payload: modal.TextInputModalPayload{Title: "Create a new directory?", Error: payload.Value + " already exists!", Validator: model.checkFileExistsInList},
+					}
+				}
+			} else {
+				_, err = target.Host.Create(client, target.Info, false)
+				if err != nil {
+					panic(err) // TODO. show error
+				}
+			}
+
+			children, _ := item.File.Children(model.network.Transport())
+			items := make([]list.Item, len(children))
+			for index, file := range children {
+				items[index] = &FileViewItem{File: &file}
+			}
+			return UpdateFilesMsg{Items: items}
+		}
+	}
+	return nil
+}
+
+func (model FileView) checkFileExistsInList(name string) (bool, string) {
+	items := model.list.Items()
+	for _, item := range items {
+		file := item.(*FileViewItem).File
+		if file.Info.Name == name {
+			return false, name + " already exists!"
+		}
+	}
+	return true, ""
 }
 
 func NewFileView(network *api.Network) tea.Model {
@@ -296,5 +461,5 @@ func NewFileView(network *api.Network) tea.Model {
 		BorderForeground(lipgloss.Color("#ffffff")).
 		BorderStyle(lipgloss.NormalBorder())
 
-	return view
+	return &view
 }
