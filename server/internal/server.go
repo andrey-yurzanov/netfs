@@ -6,13 +6,12 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"netfs/api"
-	"netfs/api/transport"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,7 +21,6 @@ const rootDirectory = "/"
 const defaultRoot = "./"
 const defaultPort = 8989
 const defaultTimeout = 2 * time.Second
-const defaultProtocol = transport.HTTP
 
 const DefaultConfigPath = "./netfs_config.json"
 
@@ -48,7 +46,7 @@ func NewServerConfig() *ServerConfig {
 	return &ServerConfig{
 		Path:     DefaultConfigPath,
 		Log:      ServerLogConfig{Level: slog.LevelInfo},
-		Network:  api.NetworkConfig{Port: defaultPort, Protocol: defaultProtocol, Timeout: defaultTimeout},
+		Network:  api.NetworkConfig{Port: defaultPort, Timeout: defaultTimeout},
 		RootList: []string{defaultRoot},
 	}
 }
@@ -81,546 +79,328 @@ func WriteServerConfig(config *ServerConfig) (*ServerConfig, error) {
 
 // The netfs server.
 type Server struct {
-	rootList      []api.FileInfo
-	copyScheduler *CopyScheduler
-	log           *slog.Logger
-	network       *api.Network
-	receiver      transport.TransportReceiver
-	stop          chan os.Signal
+	rootList  []api.FileInfo
+	scheduler *CopyScheduler
+	log       *slog.Logger
+	network   *api.Network
+	localhost *api.Host
+	stop      chan os.Signal
 }
 
-// Starts the netfs server.
 func (srv *Server) Start() error {
-	srv.receiver.Receive(api.Endpoints.ServerStop, srv.StopServerHandle)
-	srv.receiver.Receive(api.Endpoints.ServerHost, srv.ServerHostHandle)
-	srv.receiver.Receive(api.Endpoints.FileInfo.Name, srv.FileInfoHandle)
-	srv.receiver.Receive(api.Endpoints.FileChildren.Name, srv.FileChildrenHandle)
-	srv.receiver.Receive(api.Endpoints.FileCreate.Name, srv.FileCreateHandle)
-	srv.receiver.Receive(api.Endpoints.FileWrite.Name, srv.FileWriteHandle)
-	srv.receiver.Receive(api.Endpoints.FileRemove.Name, srv.FileRemoveHandle)
-	srv.receiver.Receive(api.Endpoints.FileCopyStart, srv.FileCopyStartHandle)
-	srv.receiver.Receive(api.Endpoints.FileCopy, srv.FileCopyHandle)
-	// srv.receiver.Receive(api.Endpoints.FileCopyStop.Name, srv.FileCopyCancelHandle)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/host", srv.handle(srv.Host))
 
-	err := srv.receiver.Start()
-	if err == nil {
-		defer srv.receiver.Stop()
+	mux.HandleFunc("GET /api/file", srv.handle(srv.File))
+	mux.HandleFunc("POST /api/file", srv.handle(srv.CreateFile))
+	mux.HandleFunc("DELETE /api/file", srv.handle(srv.RemoveFile))
+	mux.HandleFunc("POST /api/file/data", srv.handle(srv.WriteToFile))
+	mux.HandleFunc("GET /api/file/children", srv.handle(srv.FileChildren))
 
-		<-srv.stop // Stop signal waiting.
-	}
-	return err
-}
+	mux.HandleFunc("GET /api/task/copy", srv.handle(srv.CopyFileTasks))
+	mux.HandleFunc("POST /api/task/copy", srv.handle(srv.CopyFile))
+	mux.HandleFunc("DELETE /api/task/copy", srv.handle(srv.CancelCopyFile))
 
-// Stops the netfs server.
-func (srv *Server) Stop() error {
-	srv.stop <- syscall.SIGINT
-	close(srv.stop)
-	close(srv.copyScheduler.cancel) // TODO. cancel all active tasks
+	go http.ListenAndServe(":8989", mux)
+	<-srv.stop // Stop signal waiting.
+
 	return nil
 }
 
-// New instance of the netfs server.
-func NewServer(config *ServerConfig) (*Server, error) {
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: config.Log.Level}))
-	network, err := api.NewNetwork(config.Network)
+func (srv *Server) Stop() error {
+	srv.stop <- syscall.SIGINT
+	close(srv.stop)
+
+	srv.scheduler.CancelAll()
+	close(srv.scheduler.cancel)
+
+	return nil
+}
+
+func (srv *Server) Host(req *http.Request) (any, error) {
+	return srv.localhost, nil
+}
+
+func (srv *Server) File(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
 	if err == nil {
-		var receiver transport.TransportReceiver
-		if receiver, err = transport.NewReceiver(config.Network.Protocol, config.Network.Port); err == nil {
-			stop := make(chan os.Signal, 1)
-			signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		var info os.FileInfo
+		if info, err = os.Stat(fileId); err == nil {
+			fileType := api.FILE
+			if info.IsDir() {
+				fileType = api.DIRECTORY
+			}
 
-			rootList := make([]api.FileInfo, len(config.RootList))
-			for index, rootItem := range config.RootList {
-				var osInfo os.FileInfo
-				if osInfo, err = os.Stat(rootItem); err == nil {
-					fileType := api.FILE
-					if osInfo.IsDir() {
-						fileType = api.DIRECTORY
+			fileId = filepath.ToSlash(fileId)
+			return api.FileInfo{
+				Id:       api.FileId(fileId),
+				Name:     info.Name(),
+				Path:     fileId,
+				Type:     fileType,
+				Size:     api.FileSize(info.Size()),
+				ParentId: api.FileId(filepath.ToSlash(filepath.Dir(fileId))),
+			}, nil
+		} else {
+			err = api.NewResponseError(api.ErrFileNotFound, err.Error())
+		}
+	}
+	return nil, err
+}
+
+func (srv *Server) CreateFile(req *http.Request) (any, error) {
+	replace, err := srv.parseBool("replace", req)
+	if err == nil {
+		file := api.FileInfo{}
+		if _, err = api.Unmarshal(req.Body, &file); err == nil {
+			if _, existsErr := os.Stat(file.Path); !replace && !errors.Is(existsErr, os.ErrNotExist) {
+				err = api.NewResponseError(api.ErrFileAlreadyExists, "file [", file.Path, "] already exists")
+			}
+		}
+
+		if err == nil {
+			file.Path = filepath.ToSlash(file.Path)
+			parent := filepath.ToSlash(filepath.Dir(file.Path))
+
+			if file.Type == api.DIRECTORY {
+				err = os.MkdirAll(file.Path, 0777) // TODO. to settings?
+			} else {
+				if err = os.MkdirAll(parent, 0777); err == nil {
+					if replace {
+						os.Remove(file.Path)
 					}
 
-					rootList[index] = api.FileInfo{
-						Id:       api.FileId(rootItem),
-						Name:     osInfo.Name(),
-						Path:     rootItem,
-						Type:     fileType,
-						Size:     api.FileSize(osInfo.Size()),
-						ParentId: api.FileId(rootDirectory),
+					var created *os.File
+					if created, err = os.Create(file.Path); err == nil {
+						created.Chmod(0777)
+						created.Close()
 					}
-				} else {
-					break
 				}
 			}
 
 			if err == nil {
-				return &Server{
-					log: log,
-					copyScheduler: &CopyScheduler{
-						log:     log,
-						lock:    sync.Mutex{},
-						tasks:   make([]*api.RemoteCopyTask, 100),
-						network: network,
-						cancel:  make(chan api.TaskId),
-					},
-					network:  network,
-					receiver: receiver,
-					rootList: rootList,
-					stop:     stop,
-				}, nil
+				file.Id = api.FileId(file.Path)
+				file.Name = filepath.Base(file.Path)
+				file.ParentId = api.FileId(parent)
+
+				return file, nil
 			}
 		}
 	}
 	return nil, err
 }
 
-// Stops the server by request from current host.
-func (srv *Server) StopServerHandle(req transport.Request) ([]byte, any, error) { // TODO. Check current host.
-	return nil, nil, srv.Stop()
-}
-
-// Returns information about the current host.
-func (srv *Server) ServerHostHandle(req transport.Request) ([]byte, any, error) {
-	return nil, srv.network.LocalHost(), nil
-}
-
-// The function handles request and returns information about the file.
-func (srv *Server) FileInfoHandle(req transport.Request) ([]byte, any, error) {
-	var info *api.FileInfo
-
-	fileId, err := req.ParamRequired(api.Endpoints.FileInfo.FileId)
+func (srv *Server) RemoveFile(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
 	if err == nil {
-		srv.log.Info("FileInfoHandle()", "fileId", fileId)
+		err = os.RemoveAll(fileId)
+	}
+	return nil, err
+}
 
-		var osInfo os.FileInfo
-		if osInfo, err = os.Stat(fileId); err == nil {
-			fileType := api.FILE
-			if osInfo.IsDir() {
-				fileType = api.DIRECTORY
-			}
+func (srv *Server) WriteToFile(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
+	if err == nil {
+		var file *os.File
+		file, err = os.OpenFile(fileId, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0777)
+		if err == nil {
+			defer file.Close()
 
-			info = &api.FileInfo{
-				Id:       api.FileId(fileId),
-				Name:     osInfo.Name(),
-				Path:     fileId,
-				Type:     fileType,
-				Size:     api.FileSize(osInfo.Size()),
-				ParentId: api.FileId(filepath.Dir(fileId)),
-			}
+			_, err = io.Copy(file, req.Body)
 		}
 	}
-
-	if err != nil {
-		srv.log.Error("FileInfoHandle()", "error", err)
-		return nil, nil, err
-	} else {
-		srv.log.Info("FileInfoHandle()", "info", *info)
-		return nil, info, nil
-	}
+	return nil, err
 }
 
 // BUG. Returns empty list, after copy a single file.
-// The function handles request and returns children of the directory.
-func (srv *Server) FileChildrenHandle(req transport.Request) ([]byte, any, error) {
-	var children []api.FileInfo
-
-	fileId, err := req.ParamRequired(api.Endpoints.FileChildren.FileId)
+func (srv *Server) FileChildren(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
 	if err == nil {
-		srv.log.Info("FileChildrenHandle()", "fileId", fileId)
-
 		if fileId == rootDirectory {
-			children = srv.rootList
+			return srv.rootList, nil
 		} else {
+			if _, err = os.Stat(fileId); err != nil {
+				return nil, api.NewResponseError(api.ErrFileNotFound, "file [", fileId, "] is not found")
+			}
+
 			var entries []fs.DirEntry
 			if entries, err = os.ReadDir(fileId); err == nil {
-				children = make([]api.FileInfo, len(entries))
-
+				files := make([]api.FileInfo, len(entries))
 				for index, entry := range entries {
-					var osInfo fs.FileInfo
-					if osInfo, err = entry.Info(); err == nil {
+					var info fs.FileInfo
+					if info, err = entry.Info(); err == nil {
 						fileType := api.FILE
-						if osInfo.IsDir() {
+						if info.IsDir() {
 							fileType = api.DIRECTORY
 						}
 
-						name := osInfo.Name()
-						path := filepath.Join(fileId, name)
-						children[index] = api.FileInfo{
+						name := info.Name()
+						path := filepath.ToSlash(filepath.Join(fileId, name))
+						files[index] = api.FileInfo{
 							Id:       api.FileId(path),
 							Name:     name,
 							Path:     path,
 							Type:     fileType,
-							Size:     api.FileSize(osInfo.Size()),
-							ParentId: api.FileId(fileId),
+							Size:     api.FileSize(info.Size()),
+							ParentId: api.FileId(filepath.ToSlash(fileId)),
 						}
 					} else {
 						break
 					}
 				}
-			}
-		}
-	}
 
-	if err != nil {
-		srv.log.Error("FileChildrenHandle()", "error", err)
-		return nil, nil, err
-	} else {
-		srv.log.Info("FileChildrenHandle()", "children", children)
-		return nil, children, nil
-	}
-}
-
-// The function handles request and creates a new file or directory by api.FileInfo.
-func (srv *Server) FileCreateHandle(req transport.Request) ([]byte, any, error) {
-	var err error
-
-	replace := false
-	replaceParam := req.Param(api.Endpoints.FileCreate.Replace)
-	if replaceParam != "" {
-		replace, err = strconv.ParseBool(replaceParam)
-	}
-
-	info := &api.FileInfo{}
-	if err == nil {
-		if _, err = req.Body(info); err == nil {
-			srv.log.Info("FileCreateHandle()", "file", *info)
-
-			if info.Path == "" || info.Type == 0 {
-				err = errors.New("path and type are required fields")
-			} else {
-				if _, exists := os.Stat(info.Path); !replace && !errors.Is(exists, os.ErrNotExist) {
-					err = ErrFileAlreadyExists
-				} else {
-					if info.Type == api.DIRECTORY {
-						err = os.MkdirAll(info.Path, 0777)
-					} else {
-						parent := filepath.Dir(info.Path)
-						if err = os.MkdirAll(parent, 0777); err == nil {
-							if replace {
-								os.Remove(info.Path)
-							}
-
-							var file *os.File
-							if file, err = os.Create(info.Path); file != nil {
-								file.Chmod(0777)
-								file.Close()
-							}
-						}
-					}
+				if err == nil {
+					return files, nil
 				}
 			}
 		}
 	}
-
-	if err != nil {
-		srv.log.Error("FileCreateHandle()", "error", err)
-		return nil, nil, err
-	} else {
-		srv.log.Info("FileCreateHandle()", "file", *info)
-
-		info.Id = api.FileId(info.Path)
-		info.Name = filepath.Base(info.Path)
-		info.ParentId = api.FileId(filepath.Dir(info.Path))
-		return nil, info, nil
-	}
+	return nil, err
 }
 
-// The function handles request and writes data to a file.
-func (srv *Server) FileWriteHandle(req transport.Request) ([]byte, any, error) {
-	fileId, err := req.ParamRequired(api.Endpoints.FileInfo.FileId)
+func (srv *Server) CopyFile(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
 	if err == nil {
-		data := req.RawBody()
-		srv.log.Info("FileWriteHandle()", "fileId", "bytes", fileId, len(data))
+		fileId = filepath.ToSlash(fileId)
 
-		var file *os.File
-		file, err = os.OpenFile(fileId, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0777)
-		if err == nil {
-			file.Write(req.RawBody())
-			err = file.Close()
+		var info os.FileInfo
+		if info, err = os.Stat(fileId); err == nil {
+			fileType := api.FILE
+			if info.IsDir() {
+				fileType = api.DIRECTORY
+			}
+
+			source := api.File{
+				Host: srv.localhost,
+				Info: api.FileInfo{
+					Id:       api.FileId(fileId),
+					Name:     info.Name(),
+					Path:     fileId,
+					Type:     fileType,
+					Size:     api.FileSize(info.Size()),
+					ParentId: api.FileId(filepath.ToSlash(filepath.Dir(fileId))),
+				},
+			}
+
+			target := &api.File{}
+			if target, err = api.Unmarshal(req.Body, target); err == nil {
+				target.Host.Network = api.NewNetwork(target.Host.Network.Config) // TODO. Remove after refactoring.
+
+				taskId := filepath.ToSlash(filepath.Join(target.Host.IP.String(), string(target.Info.Id)))
+				task := api.CopyTask{Id: api.TaskId(taskId), Source: source, Target: *target, Host: srv.localhost}
+				if err = srv.scheduler.Start(&task); err == nil {
+					return task, nil
+				}
+			}
+
 		}
 	}
-
-	if err != nil {
-		srv.log.Error("FileWriteHandle()", "error", err)
-	}
-	return nil, nil, err
+	return nil, err
 }
 
-// The function handles request and removes the file.
-func (srv *Server) FileRemoveHandle(req transport.Request) ([]byte, any, error) {
-	fileId, err := req.ParamRequired(api.Endpoints.FileInfo.FileId)
+func (srv *Server) CopyFileTasks(req *http.Request) (any, error) {
+	return srv.scheduler.Tasks(), nil
+}
+
+func (srv *Server) CancelCopyFile(req *http.Request) (any, error) {
+	taskId, err := srv.parseString("taskId", req)
 	if err == nil {
-		srv.log.Info("FileRemoveHandle()", "fileId", fileId)
-		err = os.RemoveAll(fileId)
+		srv.scheduler.Cancel(api.TaskId(taskId))
 	}
-
-	if err != nil {
-		srv.log.Error("FileRemoveHandle()", "error", err)
-	}
-	return nil, nil, err
+	return nil, err
 }
 
-// The function handles request and returns information about all tasks.
-func (srv *Server) FileCopyHandle(req transport.Request) ([]byte, any, error) {
-	tasks := srv.copyScheduler.Tasks()
-	srv.log.Info("FileCopyHandle()", "tasks", tasks)
-
-	return nil, tasks, nil
+func (srv *Server) parseBool(name string, req *http.Request) (bool, error) {
+	value := req.URL.Query().Get(name)
+	if value != "" {
+		return strconv.ParseBool(value)
+	}
+	return false, api.NewResponseError(api.ErrParameterIsRequired, "parameter [", name, "] is required")
 }
 
-// The function handles request and starts a new task to copy the file or directory.
-func (srv *Server) FileCopyStartHandle(req transport.Request) ([]byte, any, error) {
-	task := &api.RemoteCopyTask{}
+func (srv *Server) parseString(name string, req *http.Request) (string, error) {
+	value := req.URL.Query().Get(name)
+	if value != "" {
+		return value, nil
+	}
+	return "", api.NewResponseError(api.ErrParameterIsRequired, "parameter [", name, "] is required")
+}
 
-	_, err := req.Body(task)
-	if err == nil {
-		srv.log.Info("FileCopyStartHandle()", "task", task)
+func (srv *Server) handle(handler func(req *http.Request) (any, error)) func(wrt http.ResponseWriter, res *http.Request) {
+	return func(wrt http.ResponseWriter, req *http.Request) {
+		srv.log.Debug("handle()", "url", req.URL, "method", req.Method)
 
-		target := &task.Target
-		if target.Info.Type == api.FILE {
-			err = target.Remove(srv.network.Transport())
+		var res []byte
+		var err error
+		var status int = http.StatusOK
+
+		var data any
+		if data, err = handler(req); err == nil && data != nil {
+			res, err = json.Marshal(data)
 		}
 
-		if err == nil {
-			if target, err = target.Host.Create(srv.network.Transport(), target.Info, true); err == nil {
-				task.Target = *target
-				err = srv.copyScheduler.StartTask(task)
+		if err != nil {
+			if resErr, ok := err.(*api.ResponseError); ok {
+				status = resErr.Code.HttpStatusCode()
+				res, err = json.Marshal(resErr)
+			} else {
+				status = http.StatusInternalServerError
 			}
 		}
-	}
 
-	if err != nil {
-		srv.log.Error("FileCopyStartHandle()", "error", err)
+		wrt.Header().Add(api.ContentType, api.JsonContentType)
+		wrt.WriteHeader(status)
+		wrt.Write(res)
+
+		srv.log.Debug("handle()", "status", status, "response", string(res), "error", err)
 	}
-	return nil, task, err
 }
 
-// The function handles request and returns status of the task.
-func (srv *Server) FileCopyStatusHandle(req transport.Request) ([]byte, any, error) { // TODO.
-	return nil, nil, nil
-}
+func NewServer(config *ServerConfig) (*Server, error) {
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: config.Log.Level}))
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-// The function handles request and stops the task.
-func (srv *Server) FileCopyCancelHandle(req transport.Request) ([]byte, any, error) {
-	taskId, err := req.ParamRequired(api.Endpoints.FileCopyCancel.TaskId)
+	network := api.NewNetwork(config.Network)
+	host, err := network.LocalHost()
 	if err == nil {
-		srv.copyScheduler.CancelTask(api.TaskId(taskId))
-	}
+		rootList := make([]api.FileInfo, len(config.RootList))
+		for index, rootItem := range config.RootList {
+			var osInfo os.FileInfo
+			if osInfo, err = os.Stat(rootItem); err == nil {
+				fileType := api.FILE
+				if osInfo.IsDir() {
+					fileType = api.DIRECTORY
+				}
 
-	if err != nil {
-		srv.log.Error("FileCopyCancelHandle()", "error", err)
-	}
-	return nil, nil, err
-}
-
-type CopyScheduler struct {
-	log     *slog.Logger
-	lock    sync.Mutex
-	tasks   []*api.RemoteCopyTask
-	network *api.Network
-	cancel  chan api.TaskId
-}
-
-func (sch *CopyScheduler) Tasks() []api.RemoteCopyTask {
-	tasks := []api.RemoteCopyTask{}
-	for _, task := range sch.tasks {
-		if task != nil && (task.Status == api.Running || task.Status == api.Failed) {
-			tasks = append(tasks, *task)
-		}
-	}
-	return tasks
-}
-
-func (sch *CopyScheduler) StartTask(task *api.RemoteCopyTask) error {
-	sch.lock.Lock()
-	defer sch.lock.Unlock()
-
-	// Check an empty position.
-	taskIndex := -1
-	for index := range sch.tasks {
-		if sch.tasks[index] == nil {
-			taskIndex = index
-			break
-		}
-	}
-
-	// Check the failed or completed task.
-	if taskIndex == -1 {
-		for index := range sch.tasks {
-			status := sch.tasks[index].Status
-			if status != api.Running {
-				taskIndex = index
+				rootList[index] = api.FileInfo{
+					Id:       api.FileId(rootItem),
+					Name:     osInfo.Name(),
+					Path:     rootItem,
+					Type:     fileType,
+					Size:     api.FileSize(osInfo.Size()),
+					ParentId: api.FileId(rootDirectory),
+				}
+			} else {
 				break
 			}
 		}
-	}
 
-	if taskIndex != -1 {
-		sch.tasks[taskIndex] = task
-
-		if task.Source.Info.Type == api.FILE {
-			task.Count = 1
-			task.Current = 1
-
-			go sch.copyFile(task, sch.cancel)
-		} else {
-			go sch.copyDirectory(task, sch.cancel)
-		}
-		return nil
-	}
-	return ErrTooManyActiveTasks
-}
-
-func (sch *CopyScheduler) CancelTask(taskId api.TaskId) {
-	sch.cancel <- taskId
-}
-
-func (sch *CopyScheduler) copyDirectory(task *api.RemoteCopyTask, cancel chan api.TaskId) {
-	sch.log.Info("CopyDirectory()", "taskId", task.Id, "started", true)
-
-	source := &task.Source
-	err := filepath.WalkDir(source.Info.Path, func(path string, entry fs.DirEntry, err error) error {
-		if path != source.Info.Path {
-			task.Count++
-		}
-		return err
-	})
-
-	sch.log.Info("CopyDirectory()", "taskId", task.Id, "count", task.Count)
-	if err == nil && task.Count > 0 {
-		task.Current = 1
-		task.Status = api.Running
-
-		target := &task.Target
-		err = filepath.WalkDir(source.Info.Path, func(path string, entry fs.DirEntry, err error) error {
-			if path != source.Info.Path {
-				sch.log.Info("CopyDirectory()", "taskId", task.Id, "path", path)
-
-				if err == nil && task.Status == api.Running {
-					select {
-					case taskId := <-cancel:
-						if taskId == task.Id {
-							task.Status = api.Cancelled
-							sch.log.Info("CopyDirectory()", "taskId", taskId, "cancelled", true)
-						}
-					default:
-						targetPath := strings.ReplaceAll(path, source.Info.Path, target.Info.Path)
-						sch.log.Info("CopyDirectory()", "taskId", task.Id, "source", path, "target", targetPath)
-
-						if entry.IsDir() {
-							_, err = target.Host.Create(
-								sch.network.Transport(),
-								api.FileInfo{Id: api.FileId(targetPath), Name: entry.Name(), Type: api.DIRECTORY, Path: targetPath, ParentId: api.FileId(filepath.Dir(targetPath))},
-								true,
-							)
-						} else {
-							err = sch.copyFile(
-								&api.RemoteCopyTask{
-									Id:   task.Id,
-									Host: task.Host,
-									Source: api.RemoteFile{
-										Host: source.Host,
-										Info: api.FileInfo{Id: api.FileId(path), Name: entry.Name(), Type: api.FILE, Path: path, ParentId: api.FileId(filepath.Dir(path))},
-									},
-									Target: api.RemoteFile{
-										Host: target.Host,
-										Info: api.FileInfo{Id: api.FileId(targetPath), Name: entry.Name(), Type: api.FILE, Path: targetPath, ParentId: api.FileId(filepath.Dir(targetPath))},
-									},
-								},
-								cancel,
-							)
-						}
-					}
-
-					if err == nil {
-						if task.Current < task.Count {
-							task.Progress = int(float32(task.Current) / float32(task.Count) * 100.0)
-							task.Current++
-							task.Status = api.Running
-						} else {
-							sch.log.Info("CopyDirectory()", "taskId", task.Id, "completed", true)
-							task.Progress = 100
-							task.Status = api.Completed
-						}
-					}
-				}
-			}
-			return err
-		})
-	}
-
-	if err != nil {
-		task.Error = err
-		task.Status = api.Failed
-
-		sch.log.Error("CopyDirectory()", "error", err)
-	}
-}
-
-func (sch *CopyScheduler) copyFile(task *api.RemoteCopyTask, cancel chan api.TaskId) error {
-	sch.log.Info("CopyFile()", "taskId", task.Id, "started", true)
-
-	source := &task.Source
-	file, err := os.Open(source.Info.Path)
-	if err == nil {
-		var info os.FileInfo
-		if info, err = file.Stat(); err == nil {
-			task.Progress = 0
-			task.Status = api.Running
-
-			read := 0
-			offset := int64(0)
-			size := info.Size()
-			buffer := make([]byte, min(size, 10485760)) // TODO. add pool
-
-			client := sch.network.Transport()
-			target := &task.Target
-			if target, err = target.Host.Create(client, target.Info, true); err == nil {
-				startTime := time.Now()
-				progressPercent := float64(size) / 100.0
-				for err == nil && task.Status == api.Running {
-					select {
-					case taskId := <-cancel:
-						if taskId == task.Id {
-							if err = target.Remove(client); err == nil {
-								task.Status = api.Cancelled
-								sch.log.Info("CopyFile()", "taskId", taskId, "cancelled", true)
-							} else {
-								sch.log.Info("CopyFile()", "taskId", taskId, "cancelled", false)
-							}
-						}
-					default:
-						if size > 0 {
-							if read, err = file.ReadAt(buffer, offset); read > 0 {
-								if err = target.Write(client, buffer[:read]); err == nil {
-									offset += int64(read)
-									task.Progress = int(min((float64(offset) / progressPercent), 100.0))
-								}
-
-								sch.log.Info("CopyFile()", "taskId", task.Id, "offset", offset, "progress", task.Progress)
-							}
-						}
-
-						if size == 0 || errors.Is(err, io.EOF) {
-							err = nil
-							endTime := time.Now()
-							task.Progress = 100.0
-							task.Status = api.Completed
-							sch.log.Info("CopyFile()", "taskId", task.Id, "progress", task.Progress, "duration", endTime.Sub(startTime), "completed", true)
-						}
-					}
-				}
-			}
+		if err == nil {
+			return &Server{
+				log:       log,
+				network:   network,
+				localhost: host,
+				rootList:  rootList,
+				stop:      stop,
+				scheduler: &CopyScheduler{
+					log:     log,
+					lock:    sync.Mutex{},
+					tasks:   make([]*api.CopyTask, 100), // TODO. from settings
+					network: network,
+					cancel:  make(chan api.TaskId),
+				},
+			}, nil
 		}
 	}
-
-	if file != nil {
-		err = errors.Join(err, file.Close())
-	}
-
-	if err != nil {
-		task.Error = err
-		task.Status = api.Failed
-
-		sch.log.Error("CopyFile()", "error", err)
-	}
-	return err
+	return nil, err
 }

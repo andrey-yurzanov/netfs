@@ -1,8 +1,6 @@
 package api
 
-import (
-	"netfs/api/transport"
-)
+import "net/http"
 
 // Status of the task.
 type TaskStatus uint8
@@ -18,25 +16,31 @@ const (
 type TaskId string
 
 // Netfs server task.
-type RemoteCopyTask struct {
-	Source   RemoteFile
-	Target   RemoteFile
-	Host     RemoteHost
+type CopyTask struct {
+	Source   File
+	Target   File
 	Id       TaskId
 	Error    error
 	Progress int
 	Count    int
 	Current  int
 	Status   TaskStatus
+	Host     *Host
 }
 
-// Cancels the current task.
-func (tsk *RemoteCopyTask) Cancel(client transport.TransportSender) error {
-	params := []string{Endpoints.FileCopyCancel.TaskId, string(tsk.Id)}
-	req, err := client.NewRequest(tsk.Host.IP, Endpoints.FileCopyCancel.Name, params, nil, nil)
-
+func (task *CopyTask) Cancel() error {
+	client := task.Host.Network.client
+	url := BuildUrl(task.Host.IP, task.Host.Network.Config.Port, "/api/task", "taskId", string(task.Id))
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err == nil {
-		_, err = client.Send(req)
+		var res *http.Response
+		if res, err = client.Do(req); err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusOK {
+				err = unmarshalError(res.Body)
+			}
+		}
 	}
 	return err
 }

@@ -1,7 +1,9 @@
 package api
 
 import (
-	"netfs/api/transport"
+	"bytes"
+	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -62,70 +64,82 @@ type FileInfo struct {
 }
 
 // File on a remote host.
-type RemoteFile struct {
+type File struct {
 	Info FileInfo
-	Host RemoteHost
+	Host *Host
 }
 
-// Returns children of the directory.
-func (file *RemoteFile) Children(client transport.TransportSender) ([]RemoteFile, error) {
-	params := []string{
-		Endpoints.FileChildren.FileId, string(file.Info.Id),
-	}
-
-	req, err := client.NewRequest(file.Host.IP, Endpoints.FileChildren.Name, params, nil, nil)
+func (file *File) Children() ([]File, error) {
+	client := file.Host.Network.client
+	url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/file/children", "fileId", string(file.Info.Id))
+	res, err := client.Get(url)
 	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
+		defer res.Body.Close()
+
+		if res.StatusCode == http.StatusOK {
 			files := []FileInfo{}
-			if _, err = res.Body(&files); err == nil {
-				result := make([]RemoteFile, len(files))
-				for index, info := range files {
-					result[index] = RemoteFile{Info: info, Host: file.Host}
-				}
-				return result, nil
+			files, err = UnmarshalArray(res.Body, &files)
+
+			result := make([]File, len(files))
+			for index, info := range files {
+				result[index] = File{Info: info, Host: file.Host}
 			}
+			return result, nil
+		} else {
+			err = unmarshalError(res.Body)
 		}
 	}
 	return nil, err
 }
 
-// Writes data to remote file.
-func (file *RemoteFile) Write(client transport.TransportSender, data []byte) error {
-	params := []string{
-		Endpoints.FileWrite.FileId, string(file.Info.Id),
-	}
-	req, err := client.NewRequest(file.Host.IP, Endpoints.FileWrite.Name, params, data, nil)
+func (file *File) Write(data []byte) error {
+	client := file.Host.Network.client
+	url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/file/data", "fileId", string(file.Info.Id))
+	res, err := client.Post(url, BinaryContentType, bytes.NewReader(data))
 	if err == nil {
-		_, err = client.Send(req)
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			err = unmarshalError(res.Body)
+		}
 	}
 	return err
 }
 
-// Copies the current file to the target file.
-func (file *RemoteFile) CopyTo(client transport.TransportSender, target RemoteFile) (*RemoteCopyTask, error) {
-	task := &RemoteCopyTask{Source: *file, Target: target}
-
-	req, err := client.NewRequest(file.Host.IP, Endpoints.FileCopyStart, nil, nil, *task)
+func (file *File) CopyTo(target File) (*CopyTask, error) {
+	data, err := json.Marshal(target)
 	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
-			if _, err = res.Body(task); err == nil {
-				return task, nil
+		client := file.Host.Network.client
+		url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/task/copy", "fileId", string(file.Info.Id))
+
+		var res *http.Response
+		if res, err = client.Post(url, JsonContentType, bytes.NewReader(data)); err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode == http.StatusOK {
+				return Unmarshal(res.Body, &CopyTask{Host: file.Host})
+			} else {
+				err = unmarshalError(res.Body)
 			}
 		}
 	}
 	return nil, err
 }
 
-// Removes the file from the remote host.
-func (file *RemoteFile) Remove(client transport.TransportSender) error {
-	params := []string{
-		Endpoints.FileRemove.FileId, string(file.Info.Id),
-	}
-	req, err := client.NewRequest(file.Host.IP, Endpoints.FileRemove.Name, params, nil, nil)
+func (file *File) Remove() error {
+	client := file.Host.Network.client
+	url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/file", "fileId", string(file.Info.Id))
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err == nil {
-		_, err = client.Send(req)
+		var res *http.Response
+		if res, err = client.Do(req); err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusOK {
+				err = unmarshalError(res.Body)
+			}
+		}
 	}
 	return err
 }

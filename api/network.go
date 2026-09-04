@@ -1,45 +1,48 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
-	"netfs/api/transport"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var ErrLocalIPNotFound = errors.New("local IP address not found")
-var RFC1918 = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+var rfc1918 = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
+const ContentType = "Content-Type"
+const JsonContentType = "application/json"
+const BinaryContentType = "application/octet-stream"
 
 const cidrEnd = "1.0/24"
 const ipSeparator = "."
 const decimalBase = 10
 
-// Network configuration.
 type NetworkConfig struct {
-	Port     uint16
-	Protocol transport.TransportProtocol
-	Timeout  time.Duration
+	Port    int
+	Timeout time.Duration
 }
 
-// Network operations.
 type Network struct {
-	host   RemoteHost
-	config NetworkConfig
-	client transport.TransportSender
+	Config NetworkConfig
+	client *http.Client
 }
 
-// Get information about available hosts.
-func (network *Network) Hosts() ([]RemoteHost, error) {
-	var hosts []RemoteHost
+func (network *Network) Hosts() ([]Host, error) {
+	var hosts []Host
 
-	ips, err := network.IPs()
+	ips, err := network.ips()
 	if err == nil {
-		callback := make(chan *RemoteHost)
+		callback := make(chan *Host)
 		for _, ip := range ips {
-			go func(ip net.IP, callback chan *RemoteHost) {
+			go func(ip net.IP, callback chan *Host) {
 				host, _ := network.Host(ip)
 				callback <- host
 			}(ip, callback)
@@ -54,62 +57,17 @@ func (network *Network) Hosts() ([]RemoteHost, error) {
 	return hosts, err
 }
 
-// Gets information about host by IP.
-func (network *Network) Host(ip net.IP) (*RemoteHost, error) {
-	req, err := network.client.NewRequest(ip, Endpoints.ServerHost, nil, nil, nil)
+func (network *Network) Host(ip net.IP) (*Host, error) {
+	res, err := network.client.Get(BuildUrl(ip, network.Config.Port, "/api/host"))
 	if err == nil {
-		var res transport.Response
-		if res, err = network.client.Send(req); err == nil {
-			host := &RemoteHost{}
-			if _, err = res.Body(host); err == nil {
-				return host, nil
-			}
-		}
+		defer res.Body.Close()
+
+		return Unmarshal(res.Body, &Host{Network: network})
 	}
 	return nil, err
 }
 
-// Gets all IPs of local network or error.
-func (network *Network) IPs() ([]net.IP, error) {
-	ips := []net.IP{}
-
-	local := network.LocalIP()
-	localString := local.String()
-	parts := strings.Split(localString, ipSeparator)
-	cidr := strings.Join([]string{parts[0], parts[1], cidrEnd}, ipSeparator)
-
-	prefix, err := netip.ParsePrefix(cidr)
-	if err == nil {
-		prefix = prefix.Masked()
-		addr := prefix.Addr()
-		for prefix.Contains(addr) {
-			ip := addr.String()
-			if localString != "" {
-				ips = append(ips, net.ParseIP(ip))
-			}
-			addr = addr.Next()
-		}
-	}
-	return ips, err
-}
-
-// Returns local IP.
-func (network *Network) LocalIP() net.IP {
-	return network.host.IP
-}
-
-// Returns local host.
-func (network *Network) LocalHost() RemoteHost {
-	return network.host
-}
-
-// Returns the associated transport.
-func (network *Network) Transport() transport.TransportSender {
-	return network.client
-}
-
-// Creates a new instance of Network, returns an error if creation failed.
-func NewNetwork(config NetworkConfig) (*Network, error) {
+func (network *Network) LocalHost() (*Host, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
 		var ips []net.IP
@@ -122,7 +80,7 @@ func NewNetwork(config NetworkConfig) (*Network, error) {
 		}
 
 		var localIP net.IP
-		for _, cidr := range RFC1918 {
+		for _, cidr := range rfc1918 {
 			_, block, _ := net.ParseCIDR(cidr)
 			for _, ip := range ips {
 				if block.Contains(ip) {
@@ -135,14 +93,77 @@ func NewNetwork(config NetworkConfig) (*Network, error) {
 		if localIP != nil {
 			var hostname string
 			if hostname, err = os.Hostname(); err == nil {
-				var client transport.TransportSender
-				if client, err = transport.NewSender(config.Protocol, config.Port, config.Timeout); err == nil {
-					return &Network{config: config, client: client, host: RemoteHost{Name: hostname, IP: localIP}}, nil
-				}
+				return &Host{Name: hostname, IP: localIP, Network: network}, nil
 			}
 		} else {
 			err = ErrLocalIPNotFound
 		}
 	}
 	return nil, err
+}
+
+func (network *Network) ips() ([]net.IP, error) {
+	ips := []net.IP{}
+	local, err := network.LocalHost()
+	if err == nil {
+		localString := local.IP.String()
+		parts := strings.Split(localString, ipSeparator)
+		cidr := strings.Join([]string{parts[0], parts[1], cidrEnd}, ipSeparator)
+
+		var prefix netip.Prefix
+		if prefix, err = netip.ParsePrefix(cidr); err == nil {
+			prefix = prefix.Masked()
+			addr := prefix.Addr()
+			for prefix.Contains(addr) {
+				ip := addr.String()
+				if localString != "" {
+					ips = append(ips, net.ParseIP(ip))
+				}
+				addr = addr.Next()
+			}
+		}
+	}
+	return ips, err
+}
+
+func NewNetwork(config NetworkConfig) *Network {
+	return &Network{Config: config, client: &http.Client{Timeout: config.Timeout}}
+}
+
+func Unmarshal[T any](reader io.Reader, value T) (T, error) {
+	data, err := io.ReadAll(reader)
+	if err == nil {
+		err = json.Unmarshal(data, value)
+	}
+	return value, err
+}
+
+func UnmarshalArray[T any](reader io.Reader, value *[]T) ([]T, error) {
+	data, err := io.ReadAll(reader)
+	if err == nil {
+		if err = json.Unmarshal(data, value); err == nil {
+			return *value, nil
+		}
+	}
+	return nil, err
+}
+
+func BuildUrl(ip net.IP, port int, endpoint string, params ...string) string {
+	newUrl := url.URL{
+		Scheme: "http",
+		Host:   ip.String() + ":" + strconv.Itoa(port),
+		Path:   endpoint,
+	}
+
+	if len(params) > 0 {
+		queryParams := url.Values{}
+
+		index := 0
+		for index < len(params)-1 {
+			queryParams.Add(params[index], params[index+1])
+			index++
+		}
+		newUrl.RawQuery = queryParams.Encode()
+	}
+	return newUrl.String()
 }

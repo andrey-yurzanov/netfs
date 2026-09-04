@@ -1,88 +1,82 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"net"
-	"netfs/api/transport"
+	"net/http"
 	"strconv"
 )
 
 const rootDirectory = "/"
 
-// Information about host.
-type RemoteHost struct {
-	Name string
-	IP   net.IP
+type Host struct {
+	Name    string
+	IP      net.IP
+	Network *Network
 }
 
-// The function returns the root directory of the remote host.
-func (host *RemoteHost) Root() *RemoteFile {
-	return &RemoteFile{Host: *host, Info: FileInfo{Id: rootDirectory, Path: rootDirectory}}
+func (host *Host) Root() *File {
+	return &File{Host: host, Info: FileInfo{Id: rootDirectory, Path: rootDirectory}}
 }
 
-// The function creates a file or directory on the remote host.
-func (host *RemoteHost) Create(client transport.TransportSender, info FileInfo, replace bool) (*RemoteFile, error) {
-	params := []string{
-		Endpoints.FileCreate.Replace, strconv.FormatBool(replace),
-	}
-
-	req, err := client.NewRequest(host.IP, Endpoints.FileCreate.Name, params, nil, info)
+func (host *Host) Create(file FileInfo, replace bool) (*File, error) {
+	data, err := json.Marshal(file)
 	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
-			info := &FileInfo{}
-			if _, err = res.Body(info); err == nil {
-				return &RemoteFile{Info: *info, Host: *host}, nil
+		client := host.Network.client
+		url := BuildUrl(host.IP, host.Network.Config.Port, "/api/file", "replace", strconv.FormatBool(replace))
+
+		var res *http.Response
+		res, err = client.Post(url, JsonContentType, bytes.NewReader(data))
+		if err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode == http.StatusOK {
+				info := &FileInfo{}
+				if info, err = Unmarshal(res.Body, info); err == nil {
+					return &File{Info: *info, Host: host}, nil
+				}
+			} else {
+				err = unmarshalError(res.Body)
 			}
 		}
 	}
 	return nil, err
 }
 
-// The function returns information about a file by id.
-func (host *RemoteHost) File(client transport.TransportSender, fileId FileId) (*RemoteFile, error) {
-	params := []string{
-		Endpoints.FileInfo.FileId, string(fileId),
-	}
-	req, err := client.NewRequest(host.IP, Endpoints.FileInfo.Name, params, nil, nil)
+func (host *Host) File(fileId FileId) (*File, error) {
+	url := BuildUrl(host.IP, host.Network.Config.Port, "/api/file", "fileId", string(fileId))
+	client := host.Network.client
+	res, err := client.Get(url)
 	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
-			info := &FileInfo{}
-			if _, err = res.Body(info); err == nil {
-				return &RemoteFile{Info: *info, Host: *host}, nil
-			}
+		defer res.Body.Close()
+
+		if res.StatusCode == http.StatusOK {
+			return Unmarshal(res.Body, &File{Host: host})
+		} else {
+			err = unmarshalError(res.Body)
 		}
 	}
 	return nil, err
 }
 
-// The function returns information about all tasks.
-func (host RemoteHost) Tasks(client transport.TransportSender) ([]RemoteCopyTask, error) {
-	req, err := client.NewRequest(host.IP, Endpoints.FileCopy, nil, nil, nil)
+func (host *Host) Tasks() ([]CopyTask, error) {
+	client := host.Network.client
+	res, err := client.Get(BuildUrl(host.IP, host.Network.Config.Port, "/api/task/copy"))
 	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
-			tasks := []RemoteCopyTask{}
-			if _, err = res.Body(&tasks); err == nil {
+		defer res.Body.Close()
+
+		if res.StatusCode == http.StatusOK {
+			tasks := []CopyTask{}
+			if tasks, err = UnmarshalArray(res.Body, &tasks); err == nil {
+				for index, _ := range tasks {
+					task := tasks[index]
+					task.Host = host
+				}
 				return tasks, nil
 			}
-		}
-	}
-	return nil, err
-}
-
-// The function returns information about a task by id.
-func (host RemoteHost) Task(client transport.TransportSender, taskId TaskId) (*RemoteCopyTask, error) {
-	params := []string{Endpoints.FileCopyStatus.TaskId, string(taskId)}
-	req, err := client.NewRequest(host.IP, Endpoints.FileCopyStatus.Name, params, nil, nil)
-
-	if err == nil {
-		var res transport.Response
-		if res, err = client.Send(req); err == nil {
-			task := &RemoteCopyTask{}
-			if _, err = res.Body(task); err == nil {
-				return task, nil
-			}
+		} else {
+			err = unmarshalError(res.Body)
 		}
 	}
 	return nil, err

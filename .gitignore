@@ -33,4 +33,5 @@ go.work.sum
 # .idea/
 # .vscode/
 
-*/netfs_config.json
+*netfs_config.json
+*bruno
