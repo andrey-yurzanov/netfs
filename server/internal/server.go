@@ -96,6 +96,7 @@ func (srv *Server) Start() error {
 	mux.HandleFunc("DELETE /api/file", srv.handle(srv.RemoveFile))
 	mux.HandleFunc("POST /api/file/data", srv.handle(srv.WriteToFile))
 	mux.HandleFunc("GET /api/file/children", srv.handle(srv.FileChildren))
+	mux.HandleFunc("PUT /api/file/name", srv.handle(srv.RenameFile))
 
 	mux.HandleFunc("GET /api/task/copy", srv.handle(srv.CopyFileTasks))
 	mux.HandleFunc("POST /api/task/copy", srv.handle(srv.CopyFile))
@@ -252,6 +253,18 @@ func (srv *Server) FileChildren(req *http.Request) (any, error) {
 					return files, nil
 				}
 			}
+		}
+	}
+	return nil, err
+}
+
+func (srv *Server) RenameFile(req *http.Request) (any, error) {
+	fileId, err := srv.parseString("fileId", req)
+	if err == nil {
+		name := ""
+		if name, err = srv.parseString("name", req); err == nil {
+			path := filepath.Join(filepath.Dir(fileId), name)
+			err = os.Rename(fileId, path)
 		}
 	}
 	return nil, err

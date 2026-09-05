@@ -50,7 +50,7 @@ func (model TextInputModalView) Init() tea.Cmd {
 func (model TextInputModalView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd, inputCmd tea.Cmd
 
-	switch msg := msg.(type) {
+	switch msg := msg.(type) { // BUG. Button 'NO' selected.
 	case tea.KeyMsg:
 		var yesPressed, noPressed, toInputPressed, toButtonsPressed bool
 		if model.isYesShortcutPressed(msg) {

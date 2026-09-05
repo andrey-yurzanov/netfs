@@ -12,7 +12,7 @@ type ModalButtonType uint8
 
 const (
 	// NONE represents an uninitialized button state.
-	NONE ModalButtonType = iota
+	NONE ModalButtonType = 1 << iota
 
 	// YES represents the confirmation action.
 	YES

@@ -143,3 +143,21 @@ func (file *File) Remove() error {
 	}
 	return err
 }
+
+func (file *File) Rename(name string) error {
+	client := file.Host.Network.client
+	url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/file/name", "fileId", string(file.Info.Id), "name", name)
+
+	req, err := http.NewRequest(http.MethodPut, url, nil)
+	if err == nil {
+		var res *http.Response
+		if res, err = client.Do(req); err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusOK {
+				err = unmarshalError(res.Body)
+			}
+		}
+	}
+	return err
+}

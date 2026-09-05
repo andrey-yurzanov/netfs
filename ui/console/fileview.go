@@ -21,6 +21,7 @@ const deleteFileAction = "DeleteFile"
 const copyFileAction = "CopyFile"
 const createFileAction = "CreateFile"
 const createDirectoryAction = "CreateDirectory"
+const renameFileAction = "RenameFileAction"
 
 var TOO_LONG_LINE_POSTFIX_WIDTH = lipgloss.Width(TOO_LONG_LINE_POSTFIX)
 
@@ -143,6 +144,21 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = model.createFile(msg, api.DIRECTORY)
 	}
 
+	if model.isRenameKeyPressed(msg) {
+		cmd = func() tea.Msg {
+			item := model.selectedItem()
+			return modal.OpenModalMsg{
+				Name:    modal.TextInputModal,
+				Action:  renameFileAction,
+				Invoker: model.id,
+				Payload: modal.TextInputModalPayload{Title: "Rename the file?", Value: item.Info.Name, Validator: model.checkFileExistsInList},
+			}
+		}
+	} else if model.isRenameFileConfirm(msg) {
+		item := model.selectedItem()
+		cmd = model.renameFile(item, msg)
+	}
+
 	if model.isDeleteKeyPressed(msg) {
 		item := model.selectedItem()
 		cmd = func() tea.Msg {
@@ -259,7 +275,6 @@ func (model FileView) isCreateFileConfirm(msg tea.Msg) bool {
 			msg.Name == modal.TextInputModal &&
 			msg.Action == createFileAction &&
 			msg.Button == modal.YES
-
 	}
 	return false
 }
@@ -270,7 +285,23 @@ func (model FileView) isCreateDirectoryConfirm(msg tea.Msg) bool {
 			msg.Name == modal.TextInputModal &&
 			msg.Action == createDirectoryAction &&
 			msg.Button == modal.YES
+	}
+	return false
+}
 
+func (model FileView) isRenameKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+g" // TODO. from settings
+	}
+	return false
+}
+
+func (model FileView) isRenameFileConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.TextInputModal &&
+			msg.Action == renameFileAction &&
+			msg.Button == modal.YES
 	}
 	return false
 }
@@ -301,6 +332,24 @@ func (model FileView) isCopyFileConfirm(msg tea.Msg) bool {
 
 	}
 	return false
+}
+
+func (model FileView) renameFile(file *api.File, msg tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		if msg, ok := msg.(modal.CloseModalMsg); ok {
+			name := msg.Payload.(modal.TextInputModalPayload).Value
+			file.Rename(name) // TODO. show error
+
+			file = model.prev.Item.(*FileViewItem).File
+			children, _ := file.Children()
+			items := make([]list.Item, len(children))
+			for index, file := range children {
+				items[index] = &FileViewItem{File: &file}
+			}
+			return UpdateFilesMsg{Items: items}
+		}
+		return nil
+	}
 }
 
 func (model FileView) resolveFileChildren(file *api.File) tea.Cmd {
