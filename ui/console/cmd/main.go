@@ -19,7 +19,6 @@ package main
 
 import (
 	"netfs/api"
-	"netfs/api/transport"
 	"netfs/ui/console"
 	"time"
 
@@ -27,17 +26,10 @@ import (
 )
 
 func main() {
-	network, err := api.NewNetwork(api.NetworkConfig{Port: 8989, Protocol: transport.HTTP, Timeout: time.Second * 1})
-	if err == nil {
-		program := tea.NewProgram(console.NewConsoleViewModel(network), tea.WithAltScreen())
+	network := api.NewNetwork(api.NetworkConfig{Port: 8989, Timeout: time.Second * 1})
+	program := tea.NewProgram(console.NewConsoleViewModel(network), tea.WithAltScreen())
 
-		go func(program *tea.Program) {
-			time.Sleep(1 * time.Second) // TODO. from settings
-
-		}(program)
-		_, err = program.Run()
-	}
-
+	_, err := program.Run()
 	if err != nil {
 		panic(err)
 	}

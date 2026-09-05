@@ -34,7 +34,7 @@ type FileViewHistoryNode struct {
 }
 
 type FileViewItem struct {
-	File *api.RemoteFile
+	File *api.File
 }
 
 func (item FileViewItem) Title() string       { return item.File.Info.Name }
@@ -95,9 +95,9 @@ type FileView struct {
 	id       string
 	delegate *FileViewItemDelegate
 	prev     *FileViewHistoryNode
-	host     *api.RemoteHost
+	host     *api.Host
 	network  *api.Network
-	toCopy   *api.RemoteFile
+	toCopy   *api.File
 }
 
 func (model FileView) Init() tea.Cmd {
@@ -220,7 +220,7 @@ func (model FileView) View() string {
 	return model.style.Render(model.list.View())
 }
 
-func (model FileView) selectedItem() *api.RemoteFile {
+func (model FileView) selectedItem() *api.File {
 	item := model.list.SelectedItem()
 	return item.(*FileViewItem).File
 }
@@ -303,10 +303,10 @@ func (model FileView) isCopyFileConfirm(msg tea.Msg) bool {
 	return false
 }
 
-func (model FileView) resolveFileChildren(file *api.RemoteFile) tea.Cmd {
+func (model FileView) resolveFileChildren(file *api.File) tea.Cmd {
 	return func() tea.Msg {
 		// TODO. Show error.
-		children, _ := file.Children(model.network.Transport())
+		children, _ := file.Children()
 		items := make([]list.Item, len(children))
 		for index, file := range children {
 			items[index] = &FileViewItem{File: &file}
@@ -317,12 +317,11 @@ func (model FileView) resolveFileChildren(file *api.RemoteFile) tea.Cmd {
 
 func (model FileView) copyFile(replace bool) tea.Cmd {
 	return func() tea.Msg {
-		client := model.network.Transport()
 		item := model.prev.Item.(*FileViewItem)
 		file := model.toCopy
 		path := filepath.Join(item.File.Info.Path, file.Info.Name)
-		target := api.RemoteFile{
-			Host: *model.host,
+		target := api.File{
+			Host: model.host,
 			Info: api.FileInfo{
 				Id:   api.FileId(path),
 				Name: file.Info.Name,
@@ -334,7 +333,7 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 
 		var err error
 		if !replace {
-			_, err = model.host.File(client, api.FileId(target.Info.Path))
+			_, err = model.host.File(api.FileId(target.Info.Path))
 			if err == nil { // File already exists.
 				return modal.OpenModalMsg{
 					Name:    modal.ConfirmModal,
@@ -343,13 +342,13 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 					Payload: target.Info.Name,
 				}
 			} else { // File not exists.
-				_, err = file.CopyTo(model.network.Transport(), target)
+				_, err = file.CopyTo(target)
 			}
 		} else {
-			_, err = file.CopyTo(model.network.Transport(), target)
+			_, err = file.CopyTo(target)
 		}
 
-		children, _ := item.File.Children(model.network.Transport())
+		children, _ := item.File.Children()
 		items := make([]list.Item, len(children))
 		for index, file := range children {
 			items[index] = &FileViewItem{File: &file}
@@ -361,10 +360,10 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 func (model FileView) deleteFile() tea.Cmd {
 	return func() tea.Msg {
 		file := model.selectedItem()
-		file.Remove(model.network.Transport())
+		file.Remove()
 
 		file = model.prev.Item.(*FileViewItem).File
-		children, _ := file.Children(model.network.Transport())
+		children, _ := file.Children()
 		items := make([]list.Item, len(children))
 		for index, file := range children {
 			items[index] = &FileViewItem{File: &file}
@@ -377,11 +376,10 @@ func (model FileView) createFile(msg tea.Msg, fileType api.FileType) tea.Cmd {
 	if msg, ok := msg.(modal.CloseModalMsg); ok {
 		payload := msg.Payload.(modal.TextInputModalPayload)
 		return func() tea.Msg {
-			client := model.network.Transport()
 			item := model.prev.Item.(*FileViewItem)
 			path := filepath.Join(item.File.Info.Path, payload.Value)
-			target := api.RemoteFile{
-				Host: *model.host,
+			target := api.File{
+				Host: model.host,
 				Info: api.FileInfo{
 					Id:   api.FileId(path),
 					Name: payload.Value,
@@ -390,7 +388,7 @@ func (model FileView) createFile(msg tea.Msg, fileType api.FileType) tea.Cmd {
 				},
 			}
 
-			_, err := model.host.File(client, api.FileId(target.Info.Path))
+			_, err := model.host.File(api.FileId(target.Info.Path))
 			if err == nil {
 				if fileType == api.FILE {
 					return modal.OpenModalMsg{
@@ -408,13 +406,13 @@ func (model FileView) createFile(msg tea.Msg, fileType api.FileType) tea.Cmd {
 					}
 				}
 			} else {
-				_, err = target.Host.Create(client, target.Info, false)
+				_, err = target.Host.Create(target.Info, false)
 				if err != nil {
 					panic(err) // TODO. show error
 				}
 			}
 
-			children, _ := item.File.Children(model.network.Transport())
+			children, _ := item.File.Children()
 			items := make([]list.Item, len(children))
 			for index, file := range children {
 				items[index] = &FileViewItem{File: &file}

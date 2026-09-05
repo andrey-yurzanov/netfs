@@ -20,7 +20,7 @@ type UpdateTaskMsg struct {
 }
 
 type TaskViewItem struct {
-	Task *api.RemoteCopyTask
+	Task *api.CopyTask
 }
 
 func (item TaskViewItem) Title() string       { return item.Task.Source.Info.Name }
@@ -90,7 +90,7 @@ func (TaskViewItemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 type TaskView struct {
 	list     list.Model
 	style    lipgloss.Style
-	host     *api.RemoteHost
+	host     *api.Host
 	network  *api.Network
 	delegate *TaskViewItemDelegate
 }
@@ -148,7 +148,7 @@ func (model TaskView) View() string {
 func (model TaskView) resolveTasks() tea.Cmd {
 	return func() tea.Msg {
 		// TODO. show error
-		tasks, err := model.host.Tasks(model.network.Transport())
+		tasks, err := model.host.Tasks()
 		if err == nil {
 			items := make([]list.Item, len(tasks))
 			for index := range items {

@@ -13,7 +13,7 @@ import (
 
 // The event sends after the host is selected.
 type ChangeActiveHostMsg struct {
-	Host  *api.RemoteHost
+	Host  *api.Host
 	Error error
 }
 
@@ -24,7 +24,7 @@ type ChangeHostsMsg struct {
 }
 
 type HostViewItem struct {
-	Host *api.RemoteHost
+	Host *api.Host
 }
 
 func (item HostViewItem) Title() string       { return item.Host.Name }

@@ -48,7 +48,7 @@ func (err *ResponseError) Is(target error) bool {
 	return false
 }
 
-func NewResponseError(code ResponseErrorCode, messages ...string) *ResponseError {
+func NewResponseError(code ResponseErrorCode, messages ...string) error {
 	return &ResponseError{Code: code, Message: strings.Join(messages, "")}
 }
 
