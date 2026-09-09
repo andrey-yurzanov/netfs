@@ -110,7 +110,27 @@ func (file *File) CopyTo(target File) (*CopyTask, error) {
 	data, err := json.Marshal(target)
 	if err == nil {
 		client := file.Host.Network.client
-		url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/task/copy", "fileId", string(file.Info.Id))
+		url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/task/copy", "fileId", string(file.Info.Id), "remove", "false")
+
+		var res *http.Response
+		if res, err = client.Post(url, JsonContentType, bytes.NewReader(data)); err == nil {
+			defer res.Body.Close()
+
+			if res.StatusCode == http.StatusOK {
+				return Unmarshal(res.Body, &CopyTask{Host: file.Host})
+			} else {
+				err = unmarshalError(res.Body)
+			}
+		}
+	}
+	return nil, err
+}
+
+func (file *File) MoveTo(target File) (*CopyTask, error) {
+	data, err := json.Marshal(target)
+	if err == nil {
+		client := file.Host.Network.client
+		url := BuildUrl(file.Host.IP, file.Host.Network.Config.Port, "/api/task/copy", "fileId", string(file.Info.Id), "remove", "true")
 
 		var res *http.Response
 		if res, err = client.Post(url, JsonContentType, bytes.NewReader(data)); err == nil {

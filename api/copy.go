@@ -17,15 +17,16 @@ type TaskId string
 
 // Netfs server task.
 type CopyTask struct {
-	Source   File
-	Target   File
-	Id       TaskId
-	Error    error
-	Progress int
-	Count    int
-	Current  int
-	Status   TaskStatus
-	Host     *Host
+	Source      File
+	Target      File
+	Id          TaskId
+	Error       error
+	Progress    int
+	Count       int
+	Current     int
+	Status      TaskStatus
+	Host        *Host
+	RemoveAfter bool
 }
 
 func (task *CopyTask) Cancel() error {

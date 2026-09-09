@@ -19,6 +19,7 @@ const TOO_LONG_LINE_POSTFIX = "..."
 
 const deleteFileAction = "DeleteFile"
 const copyFileAction = "CopyFile"
+const moveFileAction = "MoveFile"
 const createFileAction = "CreateFile"
 const createDirectoryAction = "CreateDirectory"
 const renameFileAction = "RenameFileAction"
@@ -99,6 +100,7 @@ type FileView struct {
 	host     *api.Host
 	network  *api.Network
 	toCopy   *api.File
+	toMove   *api.File
 }
 
 func (model FileView) Init() tea.Cmd {
@@ -108,7 +110,7 @@ func (model FileView) Init() tea.Cmd {
 func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd, headerCmd, footerCmd, listCmd, modalCmd tea.Cmd
 
-	// Copy files and directory.
+	// Copy file and directory.
 	if model.isCopyKeyPressed(msg) {
 		model.toCopy = model.selectedItem()
 	} else if model.isPasteKeyPressed(msg) {
@@ -117,6 +119,20 @@ func (model FileView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	} else if model.isCopyFileConfirm(msg) {
 		cmd = model.copyFile(true)
+	}
+
+	// Move file and directory.
+	if model.isMoveKeyPressed(msg) {
+		model.toCopy = nil
+		model.toMove = model.selectedItem()
+	} else if model.isPasteKeyPressed(msg) {
+		if model.toMove != nil && model.prev.Item != nil {
+			cmd = model.moveFile(model.toMove, false)
+			model.toMove = nil
+		}
+	} else if model.isMoveFileConfirm(msg) {
+		cmd = model.moveFile(model.toMove, true)
+		model.toMove = nil
 	}
 
 	// Create files and directories.
@@ -248,6 +264,13 @@ func (model FileView) isCopyKeyPressed(msg tea.Msg) bool {
 	return false
 }
 
+func (model FileView) isMoveKeyPressed(msg tea.Msg) bool {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		return msg.String() == "alt+x" // TODO. from settings
+	}
+	return false
+}
+
 func (model FileView) isPasteKeyPressed(msg tea.Msg) bool {
 	if msg, ok := msg.(tea.KeyMsg); ok {
 		return msg.String() == "alt+v" // TODO. from settings
@@ -334,6 +357,17 @@ func (model FileView) isCopyFileConfirm(msg tea.Msg) bool {
 	return false
 }
 
+func (model FileView) isMoveFileConfirm(msg tea.Msg) bool {
+	if msg, ok := msg.(modal.CloseModalMsg); ok {
+		return msg.Invoker == model.id &&
+			msg.Name == modal.ConfirmModal &&
+			msg.Action == moveFileAction &&
+			msg.Button == modal.YES
+
+	}
+	return false
+}
+
 func (model FileView) renameFile(file *api.File, msg tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		if msg, ok := msg.(modal.CloseModalMsg); ok {
@@ -395,6 +429,47 @@ func (model FileView) copyFile(replace bool) tea.Cmd {
 			}
 		} else {
 			_, err = file.CopyTo(target)
+		}
+
+		children, _ := item.File.Children()
+		items := make([]list.Item, len(children))
+		for index, file := range children {
+			items[index] = &FileViewItem{File: &file}
+		}
+		return UpdateFilesMsg{Items: items}
+	}
+}
+
+func (model FileView) moveFile(file *api.File, replace bool) tea.Cmd {
+	return func() tea.Msg {
+		item := model.prev.Item.(*FileViewItem)
+		path := filepath.Join(item.File.Info.Path, file.Info.Name)
+		target := api.File{
+			Host: model.host,
+			Info: api.FileInfo{
+				Id:   api.FileId(path),
+				Name: file.Info.Name,
+				Path: path,
+				Type: file.Info.Type,
+				Size: file.Info.Size,
+			},
+		}
+
+		var err error
+		if !replace {
+			_, err = model.host.File(api.FileId(target.Info.Path))
+			if err == nil { // File already exists.
+				return modal.OpenModalMsg{
+					Name:    modal.ConfirmModal,
+					Action:  moveFileAction,
+					Invoker: model.id,
+					Payload: target.Info.Name,
+				}
+			} else { // File not exists.
+				_, err = file.MoveTo(target)
+			}
+		} else {
+			_, err = file.MoveTo(target)
 		}
 
 		children, _ := item.File.Children()

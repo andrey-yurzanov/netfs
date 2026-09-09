@@ -182,6 +182,10 @@ func (sch *CopyScheduler) copyDirectory(task *api.CopyTask, cancel chan api.Task
 		})
 	}
 
+	if task.Status == api.Completed && task.RemoveAfter {
+		err = os.RemoveAll(task.Source.Info.Path)
+	}
+
 	if err != nil {
 		task.Error = err
 		task.Status = api.Failed
@@ -248,6 +252,10 @@ func (sch *CopyScheduler) copyFile(task *api.CopyTask, cancel chan api.TaskId) e
 
 	if file != nil {
 		err = errors.Join(err, file.Close())
+	}
+
+	if err == nil && task.Status == api.Completed && task.RemoveAfter {
+		err = os.Remove(task.Source.Info.Path)
 	}
 
 	if err != nil {

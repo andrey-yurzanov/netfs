@@ -273,6 +273,7 @@ func (srv *Server) RenameFile(req *http.Request) (any, error) {
 func (srv *Server) CopyFile(req *http.Request) (any, error) {
 	fileId, err := srv.parseString("fileId", req)
 	if err == nil {
+		removeAfter, _ := srv.parseBool("remove", req)
 		fileId = filepath.ToSlash(fileId)
 
 		var info os.FileInfo
@@ -299,7 +300,7 @@ func (srv *Server) CopyFile(req *http.Request) (any, error) {
 				target.Host.Network = api.NewNetwork(target.Host.Network.Config) // TODO. Remove after refactoring.
 
 				taskId := filepath.ToSlash(filepath.Join(target.Host.IP.String(), string(target.Info.Id)))
-				task := api.CopyTask{Id: api.TaskId(taskId), Source: source, Target: *target, Host: srv.localhost}
+				task := api.CopyTask{Id: api.TaskId(taskId), Source: source, Target: *target, Host: srv.localhost, RemoveAfter: removeAfter}
 				if err = srv.scheduler.Start(&task); err == nil {
 					return task, nil
 				}
